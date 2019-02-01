@@ -20,7 +20,148 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
-     
+#include <mysql.h>
+#include "Kalman.h"
+
+#define TEMP_DIFF 10
+time_t t;
+int error = 0;
+struct tm *local;
+
+// Mysql variables
+	
+MYSQL *connection, mysql;
+
+static const char LANG_DB_TEMP_DIFF[] = "\nWARNING: Temperature difference out of bonds (%f to %f). Data will NOT be saved!\n";
+static const char LANG_DB_HUMID_DIFF[] = "\nWARNING: Humidity value out of bonds (%i %%). Data will NOT be saved!\n";
+
+Kalman myFilterTemp(0.125,32,1023,0); //suggested initial values for high noise filtering
+Kalman myFilterHum(0.125,32,1023,0);
+Kalman myFilterPress(0.125,32,1023,0);
+
+
+float ConvertFormat(float formData)
+    {
+	char tempdata[5] = "";
+	sprintf(tempdata,"%.1f", formData);
+	float finalTemp = atof(tempdata);
+	return finalTemp;
+     }
+
+
+
+void saveTemperature(float temperature)
+{
+	static signed int t_old_min = -1;
+	static float old_value = -FLT_MAX;
+
+	t = time(NULL);
+	local = localtime(&t);
+
+	/* Store if value has changed or not from same minute */
+	if (t_old_min != local->tm_hour || old_value != temperature) {
+
+		/* Check for invalid values */
+		float difference = old_value - temperature;
+		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
+		    && old_value != -FLT_MAX) {
+			printf(LANG_DB_TEMP_DIFF, old_value, temperature);
+			return;
+		}
+
+		char query_1[255] = "";
+
+        	sprintf( query_1, "INSERT INTO wr_temperature (sensor_id, value) " "VALUES(5, %.1f)", temperature );
+
+        	int state = mysql_query(connection, query_1);
+
+        	if (state != 0) {
+                	printf("%s", mysql_error(connection));
+                	return 1;
+                }
+			
+		
+	}
+
+	t_old_min = local->tm_hour;
+	old_value = temperature;
+}
+
+
+void saveHumidity(unsigned int humidity)
+{
+	static signed int h_old_min = -1;
+	static int old_value = -INT_MAX;
+
+	t = time(NULL);
+	local = localtime(&t);
+
+	/* Store if value has changed or not from same minute */
+	if (h_old_min != local->tm_hour || old_value != humidity) {
+
+		/* Check for invalid values */
+		if (humidity <= 0 || humidity > 100) {
+			fprintf(stderr, LANG_DB_HUMID_DIFF, humidity);
+			return;
+		}
+
+		char query[255] = "";
+
+        sprintf( query, "INSERT INTO wr_humidity (sensor_id, value) " "VALUES(5, %u)", humidity);
+
+        int state = mysql_query(connection, query);
+
+        if (state != 0) {
+                printf("%s", mysql_error(connection));
+                return 1;
+                }
+	}
+
+	h_old_min = local->tm_hour;
+	old_value = humidity;
+}
+
+void savePressure(int pressure)
+{
+	static signed int t_old_min = -1;
+	static int old_value = -INT_MAX;
+
+	t = time(NULL);
+	local = localtime(&t);
+
+	/* Store if value has changed or not from same minute */
+	if (t_old_min != local->tm_hour || old_value != pressure) {
+
+		/* Check for invalid values */
+		int difference = old_value - pressure;
+		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
+		    && old_value != -INT_MAX) {
+			printf(LANG_DB_TEMP_DIFF, old_value, pressure);
+			return;
+		}
+
+		char query_1[255] = "";
+
+        	sprintf( query_1, "INSERT INTO wr_barometer (sensor_id, value) " "VALUES(5, %u)", pressure );
+
+        	int state = mysql_query(connection, query_1);
+
+        	if (state != 0) {
+                	printf("%s", mysql_error(connection));
+                	return 1;
+                }
+			
+		
+	}
+
+	t_old_min = local->tm_hour;
+	old_value = pressure;
+}
+
+
+
+
+
 int main (void) {
 
   // Variable declaration  
