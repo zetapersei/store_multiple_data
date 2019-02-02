@@ -19,6 +19,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <limits.h>
 #include <time.h>
