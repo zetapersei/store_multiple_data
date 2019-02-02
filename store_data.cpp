@@ -20,6 +20,14 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <limits.h>
+#include <time.h>
+#include <float.h>
+#include <math.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <mysql.h>
 #include "Kalman.h"
 
@@ -162,10 +170,61 @@ void savePressure(int pressure)
 
 
 
-int main (void) {
+int main (int argc, char *argv[]) 
+{
 
+	pid_t pid, sid;
+
+    // 1 - Fork
+    pid = fork(); 
+
+    if (pid < 0) 
+    {
+        exit(EXIT_FAILURE);
+    }
+    if (pid > 0) 
+    {
+        exit(EXIT_SUCCESS);
+    }
+
+    //2 - Umask
+    umask(0);
+
+    //3 - Logs
+    openlog(argv[0],LOG_NOWAIT|LOG_PID,LOG_USER); 
+    syslog(LOG_NOTICE, "Successfully started daemon\n"); 
+
+    //4 - Session Id
+    sid = setsid();
+    if (sid < 0) {
+        syslog(LOG_ERR, "Could not create process group\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //5 - WD
+    if ((chdir("/")) < 0) {
+        syslog(LOG_ERR, "Could not change working directory to /\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //6 - FD
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+	// Initialization Mysql
+	mysql_init(&mysql);
+        connection = mysql_real_connect(&mysql,"localhost", "user", "password", 
+                                    "weather", 0, 0, 0);
+
+        if (connection == NULL) {
+                printf("%s", mysql_error(&mysql));
+                return 1;
+		}
+	
+	
   // Variable declaration  
- char device[] = "28-xxxx";      // Dev ID
+ char device[] = "28-0417c3a4e1ff";      // Dev ID
  char devPath[128]; // Path to device
  char buf[256];     // Data from device
  char tmpData[6];   // Temp C * 1000 reported by device 
@@ -181,7 +240,12 @@ int main (void) {
    perror ("Couldn't open the w1 device.");
    return 1;   
   }
-  while((numRead = read(fd, buf, 256)) > 0) 
+  
+	
+while(-1)
+{	
+
+while((numRead = read(fd, buf, 256)) > 0) 
   {
    strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
    float tempC = strtof(tmpData, NULL);
@@ -191,6 +255,26 @@ int main (void) {
   }
   
   close(fd);
- 
+	
+	
+	
+	
+	
+	//float kTemp = myFilterTemp.getFilteredValue(cTemp);
+	//saveTemperature(ConvertFormat(kTemp));
+	
+	//float kHum = myFilterHum.getFilteredValue(humidity);
+	//saveHumidity((int)kHum);
+	
+	//float kPress = myFilterPress.getFilteredValue(pressure);
+	//savePressure((int)kPress);
+	
+	sleep(1);
+	
+  }
+	
+ 	mysql_close(connection);
+	
+	closelog();
         
 }
