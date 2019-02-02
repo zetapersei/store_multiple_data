@@ -248,21 +248,15 @@ while(-1)
 
 while((numRead = read(fd, buf, 256)) > 0) 
   {
-   strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
-   float tempC = strtof(tmpData, NULL);
-   //printf("Device: %s  - ", device); 
-   printf("Temp: %.1f C  ", tempC / 1000);
-   //printf("%.3f F\n\n", (tempC / 1000) * 9 / 5 + 32);
+   	strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
+	float tempC = strtof(tmpData, NULL);
+	float kTemp = myFilterTemp.getFilteredValue(cTemp / 1000);
+	saveTemperature(ConvertFormat(kTemp));
+	printf("\nTemp: %.1f C\n", (ConvertFormat(KTemp)));
   }
   
   close(fd);
 	
-	
-	
-	
-	
-	//float kTemp = myFilterTemp.getFilteredValue(cTemp);
-	//saveTemperature(ConvertFormat(kTemp));
 	
 	//float kHum = myFilterHum.getFilteredValue(humidity);
 	//saveHumidity((int)kHum);
