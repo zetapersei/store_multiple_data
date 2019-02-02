@@ -245,6 +245,12 @@ int main (int argc, char *argv[])
 	
 while(-1)
 {	
+  int fd = open(devPath, O_RDONLY);
+  if(fd == -1)
+  {
+   perror ("Couldn't open the w1 device.");
+   return 1;   
+  }
 
 while((numRead = read(fd, buf, 256)) > 0) 
   {
