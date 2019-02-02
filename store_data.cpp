@@ -235,12 +235,6 @@ int main (int argc, char *argv[])
      //  code for DS18B20 sensor 1-wire acquisition 
      
   sprintf(devPath, "%s/%s/w1_slave", path, device);
-  int fd = open(devPath, O_RDONLY);
-  if(fd == -1)
-  {
-   perror ("Couldn't open the w1 device.");
-   return 1;   
-  }
   
 	
 while(-1)
@@ -256,9 +250,9 @@ while((numRead = read(fd, buf, 256)) > 0)
   {
    strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
    float tempC = strtof(tmpData, NULL);
-   printf("Device: %s  - ", device); 
-   printf("Temp: %.3f C  ", tempC / 1000);
-   printf("%.3f F\n\n", (tempC / 1000) * 9 / 5 + 32);
+   //printf("Device: %s  - ", device); 
+   printf("Temp: %.1f C  ", tempC / 1000);
+   //printf("%.3f F\n\n", (tempC / 1000) * 9 / 5 + 32);
   }
   
   close(fd);
