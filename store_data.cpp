@@ -250,7 +250,7 @@ while((numRead = read(fd, buf, 256)) > 0)
   {
    strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
    float tempC = strtof(tmpData, NULL);
-   printf("Device: %s  - ", dev); 
+   printf("Device: %s  - ", device); 
    printf("Temp: %.3f C  ", tempC / 1000);
    printf("%.3f F\n\n", (tempC / 1000) * 9 / 5 + 32);
   }
