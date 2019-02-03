@@ -298,10 +298,10 @@ int main (int argc, char *argv[])
 	
 	
   // Variable declaration  
- 
+ char devPath[128]; // Path to device
  char buf[256];     // Data from device
  char tmpData[6];   // Temp C * 1000 reported by device 
- char path[] = "/sys/bus/w1/devices"; 
+ 
  ssize_t numRead;
  
      //  code for DS18B20 sensor 1-wire acquisition 
