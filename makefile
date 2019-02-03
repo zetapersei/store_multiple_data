@@ -9,5 +9,5 @@ store_data.o: store_data.cpp
 
 clean:
 
-rm -r store_data
-rm -r store_data_nodaemon
+	rm -r store_data
+	rm -r store_data_nodaemon
