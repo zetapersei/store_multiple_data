@@ -19,23 +19,31 @@
 #include <string.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <syslog.h>
 #include <unistd.h>
+#include <syslog.h>
 #include <limits.h>
 #include <time.h>
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
 #include <linux/i2c-dev.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <mysql.h>
 #include "Kalman.h"
+#include <wiringPi.h>
+
 
 #define TEMP_DIFF 10
+#define MAXTIMINGS	85
+#define DHTPIN		15
+int dht11_dat[5] = { 0, 0, 0, 0, 0 };
 time_t t;
 int error = 0;
 struct tm *local;
+const int SCAN_TIME = 2;
+
 
 // Mysql variables
 	
@@ -43,6 +51,10 @@ MYSQL *connection, mysql;
 
 static const char LANG_DB_TEMP_DIFF[] = "\nWARNING: Temperature difference out of bonds (%f to %f). Data will NOT be saved!\n";
 static const char LANG_DB_HUMID_DIFF[] = "\nWARNING: Humidity value out of bonds (%i %%). Data will NOT be saved!\n";
+
+char device[] = "28-0417c3a4e1ff";      // 1-Wire Dev ID
+char path[] = "/sys/bus/w1/devices"; // 1-Wire path
+
 
 Kalman myFilterTemp(0.125,32,1023,0); //suggested initial values for high noise filtering
 Kalman myFilterHum(0.125,32,1023,0);
@@ -59,7 +71,7 @@ float ConvertFormat(float formData)
 
 
 
-void saveTemperature(float temperature)
+int saveTemperature(float temperature)
 {
 	static signed int t_old_min = -1;
 	static float old_value = -FLT_MAX;
@@ -75,7 +87,7 @@ void saveTemperature(float temperature)
 		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
 		    && old_value != -FLT_MAX) {
 			printf(LANG_DB_TEMP_DIFF, old_value, temperature);
-			return;
+			return 1;
 		}
 
 		char query_1[255] = "";
@@ -97,7 +109,7 @@ void saveTemperature(float temperature)
 }
 
 
-void saveHumidity(unsigned int humidity)
+int saveHumidity(unsigned int humidity)
 {
 	static signed int h_old_min = -1;
 	static int old_value = -INT_MAX;
@@ -111,7 +123,7 @@ void saveHumidity(unsigned int humidity)
 		/* Check for invalid values */
 		if (humidity <= 0 || humidity > 100) {
 			fprintf(stderr, LANG_DB_HUMID_DIFF, humidity);
-			return;
+			return 1;
 		}
 
 		char query[255] = "";
@@ -130,7 +142,7 @@ void saveHumidity(unsigned int humidity)
 	old_value = humidity;
 }
 
-void savePressure(int pressure)
+int savePressure(int pressure)
 {
 	static signed int t_old_min = -1;
 	static int old_value = -INT_MAX;
@@ -146,7 +158,7 @@ void savePressure(int pressure)
 		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
 		    && old_value != -INT_MAX) {
 			printf(LANG_DB_TEMP_DIFF, old_value, pressure);
-			return;
+			return 1;
 		}
 
 		char query_1[255] = "";
@@ -167,6 +179,67 @@ void savePressure(int pressure)
 	old_value = pressure;
 }
 
+int read_dht11_dat()
+{
+	uint8_t laststate	= HIGH;
+	uint8_t counter		= 0;
+	uint8_t j		= 0, i;
+	float	f; /* fahrenheit */
+
+	dht11_dat[0] = dht11_dat[1] = dht11_dat[2] = dht11_dat[3] = dht11_dat[4] = 0;
+
+	/* pull pin down for 18 milliseconds */
+	pinMode( DHTPIN, OUTPUT );
+	digitalWrite( DHTPIN, LOW );
+	delay( 18 );
+	/* then pull it up for 40 microseconds */
+	digitalWrite( DHTPIN, HIGH );
+	delayMicroseconds( 40 );
+	/* prepare to read the pin */
+	pinMode( DHTPIN, INPUT );
+
+	/* detect change and read data */
+	for ( i = 0; i < MAXTIMINGS; i++ )
+	{
+		counter = 0;
+		while ( digitalRead( DHTPIN ) == laststate )
+		{
+			counter++;
+			delayMicroseconds( 1 );
+			if ( counter == 255 )
+			{
+				break;
+			}
+		}
+		laststate = digitalRead( DHTPIN );
+
+		if ( counter == 255 )
+			break;
+
+		/* ignore first 3 transitions */
+		if ( (i >= 4) && (i % 2 == 0) )
+		{
+			/* shove each bit into the storage bytes */
+			dht11_dat[j / 8] <<= 1;
+			if ( counter > 16 )
+				dht11_dat[j / 8] |= 1;
+			j++;
+		}
+	}
+
+	/*
+	 * check we read 40 bits (8bit x 5 ) + verify checksum in the last byte
+	 * print it out if data is good
+	 */
+	if ( (j >= 40) &&
+	     (dht11_dat[4] == ( (dht11_dat[0] + dht11_dat[1] + dht11_dat[2] + dht11_dat[3]) & 0xFF) ) )
+	{
+
+
+	return (dht11_dat[0]);
+
+	}
+}
 
 
 
@@ -225,8 +298,7 @@ int main (int argc, char *argv[])
 	
 	
   // Variable declaration  
- char device[] = "28-0417c3a4e1ff";      // Dev ID
- char devPath[128]; // Path to device
+ 
  char buf[256];     // Data from device
  char tmpData[6];   // Temp C * 1000 reported by device 
  char path[] = "/sys/bus/w1/devices"; 
@@ -248,23 +320,33 @@ while(-1)
 
 while((numRead = read(fd, buf, 256)) > 0) 
   {
-   	strncpy(tmpData, strstr(buf, "t=") + 2, 5); 
-	float tempC = strtof(tmpData, NULL);
-	float kTemp = myFilterTemp.getFilteredValue(cTemp / 1000);
+   	 strncpy(tmpData, strstr(buf, "t=") + 2, 5);
+   float tempC = strtof(tmpData, NULL);
+
+
+	float kTemp = myFilterTemp.getFilteredValue(tempC / 1000);
 	saveTemperature(ConvertFormat(kTemp));
-	printf("\nTemp: %.1f C\n", (ConvertFormat(KTemp)));
+	printf("\nValore Temp acquisito %.2f C\n  ", (ConvertFormat(kTemp)));
+
   }
   
   close(fd);
 	
+	// DHT11 humidity acquisition
+
+if ( wiringPiSetup() == -1 )
+		exit( 1 );
+
+	float kHum = myFilterHum.getFilteredValue(read_dht11_dat());
+	saveHumidity((int)kHum);
+	printf("\n Valore Hum acquisito  %.0f \n", kHum);
 	
-	//float kHum = myFilterHum.getFilteredValue(humidity);
-	//saveHumidity((int)kHum);
+	
 	
 	//float kPress = myFilterPress.getFilteredValue(pressure);
 	//savePressure((int)kPress);
 	
-	sleep(1);
+	sleep(SCAN_TIME);
 	
   }
 	
