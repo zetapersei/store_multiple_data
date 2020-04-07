@@ -1,6 +1,5 @@
 /* A simplified one dimensional Kalman filter implementation - actually a single variable low pass filter ;-)
    Based on: http://interactive-matter.eu/blog/2009/12/18/filtering-sensor-data-with-a-kalman-filter/
-pippo
 */
 
 #ifndef _Kalman_h
