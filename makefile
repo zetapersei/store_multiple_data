@@ -1,10 +1,12 @@
+CXX ?= g++
+
 store_data_nodaemon:
 
-	gcc  -Wall -pedantic  store_data_nodaemon.cpp  -lwiringPi `mysql_config --cflags --libs` -o store_data_nodaemon
+	$(CXX) -Wall -pedantic store_data_nodaemon.cpp -lwiringPi `mysql_config --cflags --libs` -lm -o store_data_nodaemon
 
 store_data:       
 	
-	gcc  -Wall -pedantic  store_data.cpp  -lwiringPi `mysql_config --cflags --libs` -o store_data
+	$(CXX) -Wall -pedantic store_data.cpp -lwiringPi `mysql_config --cflags --libs` -lm -o store_data
 
 
 clean:

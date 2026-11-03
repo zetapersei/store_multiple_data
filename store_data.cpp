@@ -1,357 +1,383 @@
-/* 
+/*
 *************************************************************************
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS 
-   IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED 
-   TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A 
-   PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT 
-   HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT 
-   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, 
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+   IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+   TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+   PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT
+   HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-   ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
-   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
-   OF OR INABILITY TO USE THIS SOFTWARE, EVEN IF THE COPYRIGHT HOLDERS OR 
-   CONTRIBUTORS ARE AWARE OF THE POSSIBILITY OF SUCH DAMAGE.
+   ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   OF OR INABILITY TO USE THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+   OF SUCH DAMAGE.
 ************************************************************************
 */
 
-#include <stdio.h>
-#include <string.h>
+#include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <syslog.h>
-#include <limits.h>
-#include <time.h>
 #include <float.h>
+#include <limits.h>
 #include <math.h>
-#include <stdint.h>
-#include <linux/i2c-dev.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <mysql.h>
-#include "Kalman.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <syslog.h>
+#include <time.h>
+#include <unistd.h>
 #include <wiringPi.h>
 
+#include "Kalman.h"
 
 #define TEMP_DIFF 10
-#define MAXTIMINGS	85
-#define DHTPIN		15
-int dht11_dat[5] = { 0, 0, 0, 0, 0 };
-time_t t;
-int error = 0;
-struct tm *local;
-const int SCAN_TIME = 2;
+#define MAXTIMINGS 85
+#define DHTPIN 15
 
+static const int SCAN_TIME = 2;
+static const char DEVICE[] = "28-0417c3a4e1ff";
+static const char W1_PATH[] = "/sys/bus/w1/devices";
 
-// Mysql variables
-	
-MYSQL *connection, mysql;
+static MYSQL mysql;
+static MYSQL *connection;
 
-static const char LANG_DB_TEMP_DIFF[] = "\nWARNING: Temperature difference out of bonds (%f to %f). Data will NOT be saved!\n";
-static const char LANG_DB_HUMID_DIFF[] = "\nWARNING: Humidity value out of bonds (%i %%). Data will NOT be saved!\n";
+static Kalman myFilterTemp(0.125, 32, 1023, 0);
+static Kalman myFilterHum(0.125, 32, 1023, 0);
 
-char device[] = "28-0417c3a4e1ff";      // 1-Wire Dev ID
-char path[] = "/sys/bus/w1/devices"; // 1-Wire path
-
-
-Kalman myFilterTemp(0.125,32,1023,0); //suggested initial values for high noise filtering
-Kalman myFilterHum(0.125,32,1023,0);
-Kalman myFilterPress(0.125,32,1023,0);
-
-
-float ConvertFormat(float formData)
-    {
-	char tempdata[5] = "";
-	sprintf(tempdata,"%.1f", formData);
-	float finalTemp = atof(tempdata);
-	return finalTemp;
-     }
-
-
-
-int saveTemperature(float temperature)
+static float roundToTenth(float value)
 {
-	static signed int t_old_min = -1;
-	static float old_value = -FLT_MAX;
-
-	t = time(NULL);
-	local = localtime(&t);
-
-	/* Store if value has changed or not from same minute */
-	if (t_old_min != local->tm_hour || old_value != temperature) {
-
-		/* Check for invalid values */
-		float difference = old_value - temperature;
-		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
-		    && old_value != -FLT_MAX) {
-			printf(LANG_DB_TEMP_DIFF, old_value, temperature);
-			return 1;
-		}
-
-		char query_1[255] = "";
-
-        	sprintf( query_1, "INSERT INTO wr_temperature (sensor_id, value) " "VALUES(5, %.1f)", temperature );
-
-        	int state = mysql_query(connection, query_1);
-
-        	if (state != 0) {
-                	printf("%s", mysql_error(connection));
-                	return 1;
-                }
-			
-		
-	}
-
-	t_old_min = local->tm_hour;
-	old_value = temperature;
+	return roundf(value * 10.0f) / 10.0f;
 }
 
-
-int saveHumidity(unsigned int humidity)
+static int currentHour(int *hour)
 {
-	static signed int h_old_min = -1;
-	static int old_value = -INT_MAX;
+	time_t now = time(NULL);
+	struct tm localTime;
 
-	t = time(NULL);
-	local = localtime(&t);
+	if (now == (time_t)-1 || localtime_r(&now, &localTime) == NULL) {
+		syslog(LOG_ERR, "Could not read local time");
+		return 1;
+	}
 
-	/* Store if value has changed or not from same minute */
-	if (h_old_min != local->tm_hour || old_value != humidity) {
+	*hour = localTime.tm_hour;
+	return 0;
+}
 
-		/* Check for invalid values */
-		if (humidity <= 0 || humidity > 100) {
-			fprintf(stderr, LANG_DB_HUMID_DIFF, humidity);
+static int saveTemperature(float temperature)
+{
+	static int previousHour = -1;
+	static float previousValue = -FLT_MAX;
+	int hour;
+
+	if (!isfinite(temperature) || currentHour(&hour) != 0)
+		return 1;
+
+	if (previousHour != hour || previousValue != temperature) {
+		if (previousValue != -FLT_MAX &&
+		    fabsf(previousValue - temperature) > TEMP_DIFF) {
+			syslog(LOG_WARNING,
+			       "Temperature difference out of bounds "
+			       "(%.1f to %.1f); data not saved",
+			       previousValue, temperature);
 			return 1;
 		}
 
-		char query[255] = "";
+		char query[128];
+		int length = snprintf(query, sizeof(query),
+				      "INSERT INTO wr_temperature "
+				      "(sensor_id, value) VALUES(5, %.1f)",
+				      temperature);
+		if (length < 0 || (size_t)length >= sizeof(query)) {
+			syslog(LOG_ERR, "Temperature query is too long");
+			return 1;
+		}
 
-        sprintf( query, "INSERT INTO wr_humidity (sensor_id, value) " "VALUES(5, %u)", humidity);
-
-        int state = mysql_query(connection, query);
-
-        if (state != 0) {
-                printf("%s", mysql_error(connection));
-                return 1;
-                }
+		if (mysql_query(connection, query) != 0) {
+			syslog(LOG_ERR, "MySQL: %s", mysql_error(connection));
+			return 1;
+		}
 	}
 
-	h_old_min = local->tm_hour;
-	old_value = humidity;
+	previousHour = hour;
+	previousValue = temperature;
+	return 0;
+}
+
+static int saveHumidity(unsigned int humidity)
+{
+	static int previousHour = -1;
+	static int previousValue = -1;
+	int hour;
+
+	if (humidity == 0 || humidity > 100) {
+		syslog(LOG_WARNING, "Humidity out of bounds (%u%%); data not saved",
+		       humidity);
+		return 1;
+	}
+	if (currentHour(&hour) != 0)
+		return 1;
+
+	if (previousHour != hour || previousValue != (int)humidity) {
+		char query[128];
+		int length = snprintf(query, sizeof(query),
+				      "INSERT INTO wr_humidity "
+				      "(sensor_id, value) VALUES(5, %u)",
+				      humidity);
+		if (length < 0 || (size_t)length >= sizeof(query)) {
+			syslog(LOG_ERR, "Humidity query is too long");
+			return 1;
+		}
+
+		if (mysql_query(connection, query) != 0) {
+			syslog(LOG_ERR, "MySQL: %s", mysql_error(connection));
+			return 1;
+		}
+	}
+
+	previousHour = hour;
+	previousValue = (int)humidity;
+	return 0;
 }
 
 int savePressure(int pressure)
 {
-	static signed int t_old_min = -1;
-	static int old_value = -INT_MAX;
+	static int previousHour = -1;
+	static int previousValue = INT_MIN;
+	int hour;
 
-	t = time(NULL);
-	local = localtime(&t);
+	if (currentHour(&hour) != 0)
+		return 1;
 
-	/* Store if value has changed or not from same minute */
-	if (t_old_min != local->tm_hour || old_value != pressure) {
-
-		/* Check for invalid values */
-		int difference = old_value - pressure;
-		if ((difference < -TEMP_DIFF || difference > TEMP_DIFF)
-		    && old_value != -INT_MAX) {
-			printf(LANG_DB_TEMP_DIFF, old_value, pressure);
+	if (previousHour != hour || previousValue != pressure) {
+		if (previousValue != INT_MIN &&
+		    llabs((long long)previousValue - pressure) > TEMP_DIFF) {
+			syslog(LOG_WARNING,
+			       "Pressure difference out of bounds (%d to %d); "
+			       "data not saved",
+			       previousValue, pressure);
 			return 1;
 		}
 
-		char query_1[255] = "";
+		char query[128];
+		int length = snprintf(query, sizeof(query),
+				      "INSERT INTO wr_barometer "
+				      "(sensor_id, value) VALUES(5, %d)",
+				      pressure);
+		if (length < 0 || (size_t)length >= sizeof(query)) {
+			syslog(LOG_ERR, "Pressure query is too long");
+			return 1;
+		}
 
-        	sprintf( query_1, "INSERT INTO wr_barometer (sensor_id, value) " "VALUES(5, %u)", pressure );
-
-        	int state = mysql_query(connection, query_1);
-
-        	if (state != 0) {
-                	printf("%s", mysql_error(connection));
-                	return 1;
-                }
-			
-		
+		if (mysql_query(connection, query) != 0) {
+			syslog(LOG_ERR, "MySQL: %s", mysql_error(connection));
+			return 1;
+		}
 	}
 
-	t_old_min = local->tm_hour;
-	old_value = pressure;
+	previousHour = hour;
+	previousValue = pressure;
+	return 0;
 }
 
-int read_dht11_dat()
+static int readDht11Humidity(unsigned int *humidity)
 {
-	uint8_t laststate	= HIGH;
-	uint8_t counter		= 0;
-	uint8_t j		= 0, i;
-	float	f; /* fahrenheit */
+	uint8_t data[5] = {0};
+	uint8_t lastState = HIGH;
+	unsigned int bitCount = 0;
 
-	dht11_dat[0] = dht11_dat[1] = dht11_dat[2] = dht11_dat[3] = dht11_dat[4] = 0;
+	pinMode(DHTPIN, OUTPUT);
+	digitalWrite(DHTPIN, LOW);
+	delay(18);
+	digitalWrite(DHTPIN, HIGH);
+	delayMicroseconds(40);
+	pinMode(DHTPIN, INPUT);
 
-	/* pull pin down for 18 milliseconds */
-	pinMode( DHTPIN, OUTPUT );
-	digitalWrite( DHTPIN, LOW );
-	delay( 18 );
-	/* then pull it up for 40 microseconds */
-	digitalWrite( DHTPIN, HIGH );
-	delayMicroseconds( 40 );
-	/* prepare to read the pin */
-	pinMode( DHTPIN, INPUT );
-
-	/* detect change and read data */
-	for ( i = 0; i < MAXTIMINGS; i++ )
-	{
-		counter = 0;
-		while ( digitalRead( DHTPIN ) == laststate )
-		{
-			counter++;
-			delayMicroseconds( 1 );
-			if ( counter == 255 )
-			{
+	for (unsigned int i = 0; i < MAXTIMINGS; ++i) {
+		uint8_t counter = 0;
+		while (digitalRead(DHTPIN) == lastState) {
+			if (++counter == 255)
 				break;
-			}
+			delayMicroseconds(1);
 		}
-		laststate = digitalRead( DHTPIN );
 
-		if ( counter == 255 )
+		lastState = digitalRead(DHTPIN);
+		if (counter == 255)
 			break;
 
-		/* ignore first 3 transitions */
-		if ( (i >= 4) && (i % 2 == 0) )
-		{
-			/* shove each bit into the storage bytes */
-			dht11_dat[j / 8] <<= 1;
-			if ( counter > 16 )
-				dht11_dat[j / 8] |= 1;
-			j++;
+		if (i >= 4 && i % 2 == 0) {
+			if (bitCount >= 40)
+				break;
+			data[bitCount / 8] <<= 1;
+			if (counter > 16)
+				data[bitCount / 8] |= 1;
+			++bitCount;
 		}
 	}
 
-	/*
-	 * check we read 40 bits (8bit x 5 ) + verify checksum in the last byte
-	 * print it out if data is good
-	 */
-	if ( (j >= 40) &&
-	     (dht11_dat[4] == ( (dht11_dat[0] + dht11_dat[1] + dht11_dat[2] + dht11_dat[3]) & 0xFF) ) )
-	{
+	if (bitCount != 40 ||
+	    data[4] != (uint8_t)(data[0] + data[1] + data[2] + data[3]))
+		return 1;
 
-
-	return (dht11_dat[0]);
-
-	}
+	*humidity = data[0];
+	return 0;
 }
 
-
-
-
-int main (int argc, char *argv[]) 
+static int readTemperature(float *temperature)
 {
+	char devicePath[128];
+	char buffer[256];
+	int pathLength = snprintf(devicePath, sizeof(devicePath),
+				  "%s/%s/w1_slave", W1_PATH, DEVICE);
+	if (pathLength < 0 || (size_t)pathLength >= sizeof(devicePath)) {
+		syslog(LOG_ERR, "1-Wire device path is too long");
+		return 1;
+	}
 
-	pid_t pid, sid;
+	int fd = open(devicePath, O_RDONLY);
+	if (fd == -1) {
+		syslog(LOG_ERR, "Could not open 1-Wire device: %s",
+		       strerror(errno));
+		return 1;
+	}
 
-    // 1 - Fork
-    pid = fork(); 
-
-    if (pid < 0) 
-    {
-        exit(EXIT_FAILURE);
-    }
-    if (pid > 0) 
-    {
-        exit(EXIT_SUCCESS);
-    }
-
-    //2 - Umask
-    umask(0);
-
-    //3 - Logs
-    openlog(argv[0],LOG_NOWAIT|LOG_PID,LOG_USER); 
-    syslog(LOG_NOTICE, "Successfully started daemon\n"); 
-
-    //4 - Session Id
-    sid = setsid();
-    if (sid < 0) {
-        syslog(LOG_ERR, "Could not create process group\n");
-        exit(EXIT_FAILURE);
-    }
-
-    //5 - WD
-    if ((chdir("/")) < 0) {
-        syslog(LOG_ERR, "Could not change working directory to /\n");
-        exit(EXIT_FAILURE);
-    }
-
-    //6 - FD
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-
-	// Initialization Mysql
-	mysql_init(&mysql);
-        connection = mysql_real_connect(&mysql,"localhost", "user", "password", 
-                                    "weather", 0, 0, 0);
-
-        if (connection == NULL) {
-                printf("%s", mysql_error(&mysql));
-                return 1;
+	size_t total = 0;
+	while (total < sizeof(buffer) - 1) {
+		ssize_t count = read(fd, buffer + total, sizeof(buffer) - 1 - total);
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count < 0) {
+			syslog(LOG_ERR, "Could not read 1-Wire device: %s",
+			       strerror(errno));
+			close(fd);
+			return 1;
 		}
-	
-	
-  // Variable declaration  
- char devPath[128]; // Path to device
- char buf[256];     // Data from device
- char tmpData[6];   // Temp C * 1000 reported by device 
- 
- ssize_t numRead;
- 
-     //  code for DS18B20 sensor 1-wire acquisition 
-     
-  sprintf(devPath, "%s/%s/w1_slave", path, device);
-  
-	
-while(-1)
-{	
-  int fd = open(devPath, O_RDONLY);
-  if(fd == -1)
-  {
-   perror ("Couldn't open the w1 device.");
-   return 1;   
-  }
+		if (count == 0)
+			break;
+		total += (size_t)count;
+	}
+	close(fd);
+	buffer[total] = '\0';
 
-while((numRead = read(fd, buf, 256)) > 0) 
-  {
-   	 strncpy(tmpData, strstr(buf, "t=") + 2, 5);
-   float tempC = strtof(tmpData, NULL);
+	char *value = strstr(buffer, "t=");
+	if (strstr(buffer, "YES") == NULL || value == NULL) {
+		syslog(LOG_WARNING, "Invalid 1-Wire sensor response");
+		return 1;
+	}
 
+	errno = 0;
+	char *end;
+	long milliDegrees = strtol(value + 2, &end, 10);
+	if (errno == ERANGE || end == value + 2) {
+		syslog(LOG_WARNING, "Invalid 1-Wire temperature value");
+		return 1;
+	}
 
-	float kTemp = myFilterTemp.getFilteredValue(tempC / 1000);
-	saveTemperature(ConvertFormat(kTemp));
-	printf("\nValore Temp acquisito %.2f C\n  ", (ConvertFormat(kTemp)));
+	*temperature = (float)milliDegrees / 1000.0f;
+	return 0;
+}
 
-  }
-  
-  close(fd);
-	
-	// DHT11 humidity acquisition
+static int daemonize(const char *processName)
+{
+	openlog(processName, LOG_NOWAIT | LOG_PID, LOG_USER);
 
-if ( wiringPiSetup() == -1 )
-		exit( 1 );
+	pid_t pid = fork();
+	if (pid < 0) {
+		syslog(LOG_ERR, "Could not fork: %s", strerror(errno));
+		return 1;
+	}
+	if (pid > 0)
+		return 2;
 
-	float kHum = myFilterHum.getFilteredValue(read_dht11_dat());
-	saveHumidity((int)kHum);
-	printf("\n Valore Hum acquisito  %.0f \n", kHum);
-	
-	
-	
-	//float kPress = myFilterPress.getFilteredValue(pressure);
-	//savePressure((int)kPress);
-	
-	sleep(SCAN_TIME);
-	
-  }
-	
- 	mysql_close(connection);
-	
+	umask(0);
+	if (setsid() < 0) {
+		syslog(LOG_ERR, "Could not create session: %s", strerror(errno));
+		return 1;
+	}
+	if (chdir("/") < 0) {
+		syslog(LOG_ERR, "Could not change working directory: %s",
+		       strerror(errno));
+		return 1;
+	}
+
+	int nullFd = open("/dev/null", O_RDWR);
+	if (nullFd < 0) {
+		syslog(LOG_ERR, "Could not open /dev/null: %s", strerror(errno));
+		return 1;
+	}
+	for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; ++fd) {
+		if (dup2(nullFd, fd) < 0) {
+			syslog(LOG_ERR, "Could not redirect standard descriptors: %s",
+			       strerror(errno));
+			if (nullFd > STDERR_FILENO)
+				close(nullFd);
+			return 1;
+		}
+	}
+	if (nullFd > STDERR_FILENO)
+		close(nullFd);
+
+	return 0;
+}
+
+int main(int argc, char *argv[])
+{
+	(void)argc;
+	int daemonStatus = daemonize(argv[0]);
+	if (daemonStatus != 0) {
+		if (daemonStatus == 2)
+			return EXIT_SUCCESS;
+		return EXIT_FAILURE;
+	}
+
+	syslog(LOG_NOTICE, "Sensor daemon started");
+
+	if (wiringPiSetup() == -1) {
+		syslog(LOG_ERR, "Could not initialize wiringPi");
+		closelog();
+		return EXIT_FAILURE;
+	}
+
+	if (mysql_init(&mysql) == NULL) {
+		syslog(LOG_ERR, "Could not initialize MySQL client");
+		closelog();
+		return EXIT_FAILURE;
+	}
+
+	connection = mysql_real_connect(&mysql, "localhost", "user", "password",
+					"weather", 0, NULL, 0);
+	if (connection == NULL) {
+		syslog(LOG_ERR, "MySQL connection failed: %s", mysql_error(&mysql));
+		mysql_close(&mysql);
+		closelog();
+		return EXIT_FAILURE;
+	}
+
+	for (;;) {
+		float rawTemperature;
+		if (readTemperature(&rawTemperature) == 0) {
+			float filteredTemperature =
+				roundToTenth((float)myFilterTemp.getFilteredValue(rawTemperature));
+			saveTemperature(filteredTemperature);
+			syslog(LOG_INFO, "Temperature: %.1f C", filteredTemperature);
+		}
+
+		unsigned int rawHumidity;
+		if (readDht11Humidity(&rawHumidity) == 0) {
+			float filteredHumidity =
+				(float)myFilterHum.getFilteredValue(rawHumidity);
+			saveHumidity((unsigned int)filteredHumidity);
+			syslog(LOG_INFO, "Humidity: %.0f%%", filteredHumidity);
+		} else {
+			syslog(LOG_WARNING, "Invalid DHT11 response");
+		}
+
+		sleep(SCAN_TIME);
+	}
+
+	mysql_close(connection);
 	closelog();
-        
+	return EXIT_SUCCESS;
 }
